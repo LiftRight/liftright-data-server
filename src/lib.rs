@@ -1,7 +1,7 @@
 use dotenv::dotenv;
 use mongodb::{options::ClientOptions, Client, Collection};
 use std::env;
-use url::{Url};
+use url::Url;
 use warp::reject::Reject;
 
 pub mod imurecords;
