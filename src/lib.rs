@@ -1,6 +1,7 @@
 use dotenv::dotenv;
 use mongodb::{options::ClientOptions, Client, Collection};
 use std::env;
+use url::{Url};
 use warp::reject::Reject;
 
 pub mod imurecords;
@@ -17,6 +18,7 @@ pub mod user;
 pub enum LrdsError {
     ConversionError,
     UnimplementedError,
+    UrlParseError(url::ParseError),
     DbError(mongodb::error::Error),
     ObjectIdError(mongodb::bson::oid::Error),
     DbSerializationError(mongodb::bson::ser::Error),
@@ -34,10 +36,9 @@ pub async fn establish_db_connection() -> Result<Collection, LrdsError> {
 
     let connection_handle =
         env::var("MONGO_DATABASE_CONN").expect("MONGO_DATABASE_CONN must be set!");
-    let database_name = connection_handle
-        .split('/')
-        .last()
-        .expect("database must be set in MONGO_DATABASE_CONN");
+
+    let mongodb_url = Url::parse(&connection_handle).map_err(LrdsError::UrlParseError)?;
+    let database_name = &mongodb_url.path()[1..];
 
     let client_options = ClientOptions::parse(&connection_handle)
         .await
