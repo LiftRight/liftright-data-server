@@ -1,55 +1,131 @@
 ---
+os: linux
 dist: focal
 language: rust
 cache: cargo
 rust:
   - 1.45.2
 
-services:
-  - docker
+env:
+  global:
+    BASE_IMAGE: alexlauni/liftright-data-server
+    DOCKER_BUILDKIT: 1
 
-before_install: |
-  LATEST_KUBE_VERSION=$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt) &&
-  curl -LO "https://storage.googleapis.com/kubernetes-release/release/${LATEST_KUBE_VERSION}/bin/linux/amd64/kubectl" && 
-  chmod +x kubectl && mkdir -p ~/bin && mv kubectl ~/bin 
-
-before_script:
-- rustup component add rustfmt
-- rustup component add clippy
-
-# As a result of https://github.com/travis-ci/travis-ci/issues/1066, we run
-# everything in one large command instead of multiple commands.
-# In this way, the build stops immediately if one of the commands fails.
-script: |
-  cargo fmt --all -- --check &&
-  cargo clippy -- -D warnings &&
-  cargo build &&
-  cargo test &&
-  docker build -t alexlauni/liftright-data-server:$(git rev-parse --short ${TRAVIS_COMMIT}) \
-    -t alexlauni/liftright-data-server:latest -f Dockerfile .
-
-deploy:
-  provider: script
-  script:
-    - docker login -u ${DOCKER_USERNAME} --password ${DOCKER_PASSWORD}
-    - docker push alexlauni/liftright-data-server
-  on:
-    branch: main
-
-after_deploy: |
-  export NEW_IMAGE="alexlauni/liftright-data-server:$(git rev-parse --short ${TRAVIS_COMMIT})" &&
-  git clone https://github.com/LiftRight/lrds-deploy &&
-  cd lrds-deploy/lrds/bases/backend/ &&
-  ~/bin/kubectl patch --local \
-    -o yaml \
-    -f deployment.yaml \
-    -p "spec:
-          template:
-            spec:
-              containers:
-                - name: lrds
-                  image: ${NEW_IMAGE}" \
-    > /tmp/newdeployment.yaml &&
-   mv /tmp/newdeployment.yaml deployment.yaml &&
-   git commit deployment.yaml -m "Update docker image to ${NEW_IMAGE}" &&
-   git push
+jobs:
+  include:
+    - stage: build
+      before_script:
+        - rustup component add rustfmt
+        - rustup component add clippy
+      # As a result of https://github.com/travis-ci/travis-ci/issues/1066, we run
+      # everything in one large command instead of multiple commands.
+      # In this way, the build stops immediately if one of the commands fails.
+      script: |
+        cargo fmt --all -- --check &&
+        cargo clippy -- -D warnings &&
+        cargo build &&
+        cargo test
+    - stage: build
+      services:
+        - docker
+      before_script:
+        - echo ${DOCKER_PASSWORD} | docker login -u ${DOCKER_USERNAME} --password-stdin
+      script:
+        - export SHORT_TAG=$(git rev-parse --short ${TRAVIS_COMMIT})
+        - export BRANCH_TAG=${TRAVIS_BRANCH}-${SHORT_TAG}
+        - docker build
+          --target planner
+          --cache-from ${BASE_IMAGE}:planner
+          --tag ${BASE_IMAGE}:planner
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          "."
+        - docker build
+          --target cacher
+          --cache-from ${BASE_IMAGE}:planner
+          --cache-from ${BASE_IMAGE}:cacher
+          --tag ${BASE_IMAGE}:cacher
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          "."
+        - docker build
+          --target builder
+          --cache-from ${BASE_IMAGE}:planner
+          --cache-from ${BASE_IMAGE}:cacher
+          --cache-from ${BASE_IMAGE}:builder
+          --tag ${BASE_IMAGE}:builder
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          "."
+        - docker build
+          --cache-from ${BASE_IMAGE}:planner
+          --cache-from ${BASE_IMAGE}:cacher
+          --cache-from ${BASE_IMAGE}:builder
+          --cache-from ${BASE_IMAGE}:latest 
+          --tag ${BASE_IMAGE}:latest
+          --tag ${BASE_IMAGE}:${BRANCH_TAG}
+          --build-arg BUILDKIT_INLINE_CACHE=1
+          "."
+      after_success:
+        - docker push ${BASE_IMAGE}:planner
+        - docker push ${BASE_IMAGE}:cacher
+        - docker push ${BASE_IMAGE}:builder
+      deploy:
+        - provider: script
+          edge: true
+          script:
+            - docker push ${BASE_IMAGE}
+          on:
+            all_branches: true
+        - provider: script
+          edge: true
+          script:
+            - docker tag ${BASE_IMAGE} ${BASE_IMAGE}:${SHORT_TAG}
+            - docker push ${BASE_IMAGE}
+          on:
+            branch: main
+    - stage: benchmark
+      language: python
+      python:
+        - "3.8"
+      before_install:
+        - pip install pipenv
+        - git clone https://github.com/wg/wrk.git wrk &&
+          cd wrk &&
+          make &&
+          mv wrk ~/bin &&
+          cd ..
+      install:
+        - git clone https://launibot:${GH_TOKEN}@github.com/LiftRight/lrds-bench
+        - |
+          PSHA=$(git cat-file -p ${TRAVIS_COMMIT} |grep parent |tail -n1 |cut -d ' ' -f2) &&
+          PBRANCH=$(git name-rev --name-only ${PSHA})
+        - cd lrds-bench
+        - docker-compose -f mongo-compose.yaml up -d
+        - pipenv install
+      script:
+        - export BRANCH_TAG=${TRAVIS_BRANCH}-$(git rev-parse --short ${TRAVIS_COMMIT})
+        - git clone --single-branch --branch=gh-pages https://github.com/lamalex/liftright-data-server.git output
+        - rm -f output/${PBRANCH}*.json
+        - pipenv run python bench-tags.py --runs=1 --on-tag=${BRANCH_TAG} --output=output
+      after_script:
+        - docker run --rm -it lumir/remove-dockerhub-tag --user ${DOCKER_USERNAME} --password ${DOCKER_PASSWORD} ${DOCKER_USERNAME}/liftright-data-server:${BRANCH_TAG}
+      deploy:
+        provider: pages
+        edge: true
+        strategy: git
+        token: ${GH_TOKEN}
+        local_dir: output
+        cleanup: false
+        on:
+          all_branches: true
+    - stage: rollout
+      if: branch = main AND NOT type = pull_request
+      before_install:
+        - curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash &&
+          mv kustomize ~/bin
+      script: |
+        export SHORT_TAG=$(git rev-parse --short ${TRAVIS_COMMIT}) &&
+        git clone https://github.com/LiftRight/lrds-deploy.git &&
+        cd lrds-deploy/lrds/overlays/staging &&
+        kustomize edit set image alexlauni/liftright-data-server=alexlauni/liftright-data-server:${SHORT_TAG} &&
+        git commit kustomization.yaml -m "Update staging docker image to ${SHORT_TAG}" &&
+        git remote set-url origin https://launibot:${GH_TOKEN}@github.com/LiftRight/lrds-deploy.git &&
+        git push origin main
