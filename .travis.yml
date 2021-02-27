@@ -86,23 +86,25 @@ jobs:
       python:
         - "3.8"
       before_install:
+        - sudo add-apt-repository -y ppa:jfhovinne/groovy-focal-backports
+        - sudo apt-get -q update
+        - sudo apt-get -y install wrk
         - pip install pipenv
-        - git clone https://github.com/wg/wrk.git wrk &&
-          cd wrk &&
-          make &&
-          mv wrk ~/bin &&
-          cd ..
       install:
-        - git clone https://launibot:${GH_TOKEN}@github.com/LiftRight/lrds-bench
+        - git config --replace-all remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+        - git fetch
         - |
           PSHA=$(git cat-file -p ${TRAVIS_COMMIT} |grep parent |tail -n1 |cut -d ' ' -f2) &&
-          PBRANCH=$(git name-rev --name-only ${PSHA})
+          PBRANCH=$(git name-rev --name-only ${PSHA} |cut -d '/' -f3)
+        - git clone https://launibot:${GH_TOKEN}@github.com/LiftRight/lrds-bench
         - cd lrds-bench
-        - docker-compose -f mongo-compose.yaml up -d
         - pipenv install
+      before_script:
+        - docker-compose -f mongo-compose.yaml up -d
       script:
         - export BRANCH_TAG=${TRAVIS_BRANCH}-$(git rev-parse --short ${TRAVIS_COMMIT})
         - git clone --single-branch --branch=gh-pages https://github.com/lamalex/liftright-data-server.git output
+        - echo "Removing ${PBRANCH}*.json"
         - rm -f output/${PBRANCH}*.json
         - pipenv run python bench-tags.py --runs=1 --on-tag=${BRANCH_TAG} --output=output
       after_script:

@@ -16,7 +16,7 @@ const BUCKET_SET_REPETITION_LIMIT: i32 = 1000;
 
 #[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize)]
 enum RecordKind {
-    Repetiton,
+    Repetition,
     ImuData,
     Survey,
 }
@@ -142,7 +142,7 @@ impl From<&Set> for SetQuery {
     fn from(set: &Set) -> Self {
         SetQuery {
             id: bson::Bson::to_bucket_selector(set.session.device_id),
-            kind: RecordKind::Repetiton,
+            kind: RecordKind::Repetition,
             device_id: set.session.device_id,
             session_id: set.session.session_id,
             set_id: set.set_id,
